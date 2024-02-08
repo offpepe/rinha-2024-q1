@@ -13,9 +13,7 @@ var scenario = Scenario.Create("Meu Primeiro Teste Carga", async context =>
 })
     .WithWarmUpDuration(TimeSpan.FromSeconds(10))
     .WithLoadSimulations(
-    Simulation.RampingInject(rate: 10000,
-                             interval: TimeSpan.FromSeconds(5),
-                             during: TimeSpan.FromMinutes(2))
+        Simulation.RampingConstant(copies: 20, during: TimeSpan.FromMinutes(1))   
     );
 
 NBomberRunner
