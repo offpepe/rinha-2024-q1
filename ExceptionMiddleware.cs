@@ -1,5 +1,7 @@
-﻿using System.Runtime.CompilerServices;
+﻿using System.Net;
+using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.Unicode;
 using Rinha2024.Dotnet.Exceptions;
 
 namespace Rinha2024.Dotnet;
@@ -13,15 +15,14 @@ public class ExceptionMiddleware : IMiddleware
         {
             await next(context);
         }
-        catch (Exception e)
+        catch (BadHttpRequestException _)
         {
-            context.Response.StatusCode = e switch
-            {
-                NotFoundException notFound => (int) notFound.StatusCode,
-                UnprocessableContentException unprocessableContentException => (int) unprocessableContentException
-                    .StatusCode,
-                _ => 500    
-            };
+            context.Response.StatusCode = (int) HttpStatusCode.UnprocessableEntity;
+            context.Response.Body = new MemoryStream([]);
+        }
+        catch
+        {
+            throw;
         }
     }
 }

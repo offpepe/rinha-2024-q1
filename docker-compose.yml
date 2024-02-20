@@ -12,27 +12,42 @@ services:
     ports:
       - '3001:3000'
     environment:
+      TWIN_ADDRESS: api02
+      LABEL: "api01"
       ASPNETCORE_ENVIRONMENT: Development
       DB_HOSTNAME: db
       Kestrel__Endpoints__Http__Url: http://0.0.0.0:3000
       ConnectionStrings__DB: Host=db:5432;Port=5432;Database=rinha;Username=admin;Password=123;Pooling=true;Minimum Pool Size=50;Maximum Pool Size=2000;Multiplexing=true;Timeout=15;Command Timeout=15;Cancellation Timeout=-1;No Reset On Close=true;Max Auto Prepare=20;Auto Prepare Min Usages=1;
+      READ_POOL_SIZE: 250
+      WRITE_POOL_SIZE: 750
+      MAX_CONCURRENT_CONNECTIONS: 1000
+      UDP_SOCKET_RECEIVE_TIMEOUT: 2
+      UDP_SOCKET_SEND_TIMEOUT: 2
     deploy:
       resources:
         limits:
           cpus: "0.2"
-          memory: "130MB"
+          memory: "100MB"
   api02:
-    <<: *api
+    <<: *api  
     hostname: api02
     depends_on: 
       - db
     ports:
       - '3002:3000'
     environment:
+      TWIN_ADDRESS: api01
+      LABEL: "api02"
       ASPNETCORE_ENVIRONMENT: Development
       DB_HOSTNAME: db
       Kestrel__Endpoints__Http__Url: http://0.0.0.0:3000
-
+      ConnectionStrings__DB: Host=db:5432;Port=5432;Database=rinha;Username=admin;Password=123;Pooling=true;Minimum Pool Size=50;Maximum Pool Size=2000;Multiplexing=true;Timeout=15;Command Timeout=15;Cancellation Timeout=-1;No Reset On Close=true;Max Auto Prepare=20;Auto Prepare Min Usages=1;
+      MAX_CONCURRENT_CONNECTIONS: 1000
+      READ_POOL_SIZE: 250
+      WRITE_POOL_SIZE: 750
+      SYNC_MEMORY: false
+      UDP_SOCKET_RECEIVE_TIMEOUT: 2
+      UDP_SOCKET_SEND_TIMEOUT: 2
   db:
     image: postgres:latest
     hostname: db
@@ -44,12 +59,12 @@ services:
       - "5432:5432"
     volumes:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    command: postgres -c max_connections=1000 -c max_wal_size=4096 -c checkpoint_timeout=600 -c synchronous_commit=off -c effective_cache_size=225MB -c shared_buffers=75MB -c fsync=off -c huge_pages=off -c work_mem=100MB -c maintenance_work_mem=256MB -c effective_io_concurrency=4
+    command: postgres -c max_connections=2000 -c max_wal_size=4096 -c checkpoint_timeout=600 -c synchronous_commit=off -c effective_cache_size=225MB -c shared_buffers=75MB -c fsync=off -c huge_pages=off -c work_mem=100MB -c maintenance_work_mem=256MB -c effective_io_concurrency=4 -c statement_timeout=60
     deploy:
       resources:
         limits:
           cpus: "1"
-          memory: "250MB"
+          memory: "300MB"
   nginx:
     image: nginx:latest
     volumes:
@@ -63,7 +78,7 @@ services:
       resources:
         limits:
           cpus: "0.1"
-          memory: "40MB"
+          memory: "50MB"
 
 networks: 
   default:

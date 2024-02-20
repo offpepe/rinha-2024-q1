@@ -2,6 +2,8 @@
 WORKDIR /app
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+RUN apt update
+RUN apt install -y clang zlib1g-dev
 WORKDIR /src
 COPY ["Rinha2024.Dotnet.csproj", "./"]
 RUN dotnet restore "Rinha2024.Dotnet.csproj"
@@ -10,8 +12,6 @@ WORKDIR "/src/"
 RUN dotnet build "Rinha2024.Dotnet.csproj" -c Release -o /app/build
 
 FROM build AS publish
-RUN apt update
-RUN apt install -y clang zlib1g-dev
 RUN dotnet publish -c Release -o /app/publish /p:UseAppHost=true
 
 FROM base AS final
