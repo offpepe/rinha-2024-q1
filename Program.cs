@@ -19,9 +19,8 @@ builder.Services.AddSingleton<Database>();
 builder.Services.AddSingleton<ExceptionMiddleware>();
 builder.Services.AddLogging(l => l.AddSimpleConsole()); 
 var app = builder.Build();
-app.UseMiddleware<ExceptionMiddleware>();
 app.SetControllers();
-await app.Services.GetRequiredService<Database>().Stretching();
+// await app.Services.GetRequiredService<Database>().Stretching();
 app.Run();
 
 [JsonSerializable(typeof(SaldoDto))]

@@ -61,8 +61,6 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
         cmd.Parameters[1].Value = dto.Valor;
         cmd.Parameters[2].Value = dto.Tipo;
         cmd.Parameters[3].Value = dto.Descricao;
-        await using var connection = await dataSource.OpenConnectionAsync();
-        cmd.Connection = connection;
         await cmd.ExecuteNonQueryAsync();
         var balance = (int) (cmd.Parameters[4].Value ?? 0);
         var limit = (int) (cmd.Parameters[5].Value ?? 0); 
@@ -70,38 +68,11 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
         return [balance, limit];
     }
     
-
-    public async Task<IEnumerable<TransactionDto>> GetTransactions(int id)
-    {
-        await using var poolItem = await _readCommandPool.RentAsync();
-        var cmd = poolItem.Value;
-        cmd.Parameters[0].Value = id;
-        await using var connection = await dataSource.OpenConnectionAsync();
-        cmd.Connection = connection;
-        await using var reader = await cmd.ExecuteReaderAsync();
-        if (!reader.HasRows) return [];
-        var transactions = new List<TransactionDto>();
-        while (await reader.ReadAsync())
-        {
-            transactions.Add(new TransactionDto()
-            {
-                valor = reader.GetInt32(0),
-                tipo = reader.GetChar(1),
-                descricao = reader.GetString(2),
-                realizada_em = reader.GetString(3)
-            });
-        }
-
-        return transactions;
-    }
-    
     public async Task<ExtractDto?> GetExtract(int id)
     {
         await using var poolItem = await _readCommandPool.RentAsync();
         var cmd = poolItem.Value;
         cmd.Parameters[0].Value = id;
-        await using var connection = await dataSource.OpenConnectionAsync();
-        cmd.Connection = connection;
         await using var reader = await cmd.ExecuteReaderAsync();
         if (!reader.HasRows) return null;
         await reader.ReadAsync();
@@ -110,7 +81,7 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
         if (hasTransactions) return new ExtractDto(balance, []);
         var transactions = new List<TransactionDto>()
         {
-            new TransactionDto()
+            new()
             {
                 valor = reader.GetInt32(0),
                 tipo = reader.GetChar(1),
@@ -202,7 +173,6 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
 
     private sealed class CommandPool : IAsyncDisposable
     {
-        private int _awaitingConnections;
         private readonly Channel<NpgsqlCommand> _conns = Channel.CreateUnbounded<NpgsqlCommand>(
             new UnboundedChannelOptions
             {
@@ -223,7 +193,6 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
         {
             NpgsqlCommand? item = null;
             Command command;
-            Interlocked.Increment(ref _awaitingConnections);
             try
             {
                 item = await _conns.Reader.ReadAsync();
@@ -235,10 +204,7 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
                     await _conns.Writer.WriteAsync(item);
                 throw;
             }
-            Interlocked.Decrement(ref _awaitingConnections);
             return command;
-            
-            
         }
 
         private async ValueTask<List<NpgsqlCommand>> ReturnAllAsync()
@@ -250,10 +216,7 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
         }
 
         private async ValueTask ReturnPoolItemAsync(Command command)
-        {
-            command.Value.Connection = null;
-            await _conns.Writer.WriteAsync(command.Value);
-        }
+        => await _conns.Writer.WriteAsync(command.Value);
 
         public async ValueTask DisposeAsync()
         {
