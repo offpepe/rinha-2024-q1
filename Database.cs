@@ -6,29 +6,27 @@ namespace Rinha2024.Dotnet;
 
 public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
 {
-    private bool _disposed = false;
+    private bool _isDisposed;
 
     private static readonly int ReadPoolSize = int.TryParse(Environment.GetEnvironmentVariable("READ_POOL_SIZE"), out var value) ? value : 1500;
     private static readonly int WritePoolSize = int.TryParse(Environment.GetEnvironmentVariable("WRITE_POOL_SIZE"), out var value) ? value : 3000;
 
-    private readonly Pool _transactionPool =
+    private readonly CommandPool _readCommandPool =
         new(
             CreateCommands(
                 new NpgsqlCommand(QUERY_TRANSACTIONS)
-                    {Parameters = {new NpgsqlParameter<int> {NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer}}},
-                ReadPoolSize),
+                {
+                    Parameters = {new NpgsqlParameter<int> {NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer}},
+                    Connection = dataSource.OpenConnection(),
+                },
+                ReadPoolSize, dataSource),
             ReadPoolSize);
-    private readonly Pool _balancePool = 
-        new(
-            CreateCommands(
-                new NpgsqlCommand(QUERY_BALANCE)
-                    {Parameters = {new NpgsqlParameter<int> {NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer}}},
-                ReadPoolSize),
-            ReadPoolSize);
-    private readonly Pool _debitPool =
+    
+    private readonly CommandPool _debitCommandPool =
         new(CreateCommands(new NpgsqlCommand("CREATE_TRANSACTION_DEBIT")
         {
             CommandType = CommandType.StoredProcedure,
+            Connection = dataSource.OpenConnection(),
             Parameters =
             {
                 new NpgsqlParameter<int> {NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer},
@@ -38,11 +36,12 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
                 new NpgsqlParameter<int> {NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Direction = ParameterDirection.Output},
                 new NpgsqlParameter<int> {NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Direction = ParameterDirection.Output},
             }
-        }, WritePoolSize), WritePoolSize);
-    private readonly Pool _creditPool =
+        }, WritePoolSize, dataSource), WritePoolSize);
+    private readonly CommandPool _creditCommandPool =
         new(CreateCommands(new NpgsqlCommand("CREATE_TRANSACTION_CREDIT")
         {
             CommandType = CommandType.StoredProcedure,
+            Connection = dataSource.OpenConnection(),
             Parameters =
             {
                 new NpgsqlParameter<int> {NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer},
@@ -52,11 +51,11 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
                 new NpgsqlParameter<int> {NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Direction = ParameterDirection.Output},
                 new NpgsqlParameter<int> {NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Direction = ParameterDirection.Output},
             }
-        }, WritePoolSize), WritePoolSize);
+        }, WritePoolSize, dataSource), WritePoolSize);
 
     public async Task<int[]?> DoTransaction(int id, CreateTransactionDto dto)
     {
-        await using var poolItem = dto.Tipo == 'd' ? await _debitPool.RentAsync() : await _creditPool.RentAsync();
+        await using var poolItem = dto.Tipo == 'd' ? await _debitCommandPool.RentAsync() : await _creditCommandPool.RentAsync();
         var cmd = poolItem.Value;
         cmd.Parameters[0].Value = id;
         cmd.Parameters[1].Value = dto.Valor;
@@ -70,25 +69,11 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
         if (limit == 0) return null;
         return [balance, limit];
     }
-
-
-    public async Task<SaldoDto?> GetBalance(int id)
-    {
-        await using var poolItem = await _balancePool.RentAsync();
-        var cmd = poolItem.Value;
-        cmd.Parameters[0].Value = id;
-        await using var connection = await dataSource.OpenConnectionAsync();
-        cmd.Connection = connection;
-        await using var reader = await cmd.ExecuteReaderAsync();
-        if (!await reader.ReadAsync()) return null;
-        var balance = reader.GetInt32(0);
-        var limit = reader.GetInt32(1);
-        return new SaldoDto(balance, limit);
-    }
+    
 
     public async Task<IEnumerable<TransactionDto>> GetTransactions(int id)
     {
-        await using var poolItem = await _transactionPool.RentAsync();
+        await using var poolItem = await _readCommandPool.RentAsync();
         var cmd = poolItem.Value;
         cmd.Parameters[0].Value = id;
         await using var connection = await dataSource.OpenConnectionAsync();
@@ -112,7 +97,7 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
     
     public async Task<ExtractDto?> GetExtract(int id)
     {
-        await using var poolItem = await _transactionPool.RentAsync();
+        await using var poolItem = await _readCommandPool.RentAsync();
         var cmd = poolItem.Value;
         cmd.Parameters[0].Value = id;
         await using var connection = await dataSource.OpenConnectionAsync();
@@ -160,11 +145,13 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
     }
     
 
-    private static IEnumerable<NpgsqlCommand> CreateCommands(NpgsqlCommand cmd, int qtd)
+    private static IEnumerable<NpgsqlCommand> CreateCommands(NpgsqlCommand cmd, int qtd, NpgsqlDataSource dataSource)
     {
         for (var i = 0; i < qtd; i++)
         {
-            yield return cmd.Clone();
+            var clone = cmd.Clone();
+            clone.Connection = dataSource.OpenConnection();
+            yield return clone;
         }
 
         yield return cmd;
@@ -207,18 +194,16 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
-        await _transactionPool.DisposeAsync();
-        await _creditPool.DisposeAsync();
+        if (_isDisposed) return;
+        _isDisposed = true;
+        await _readCommandPool.DisposeAsync();
+        await _creditCommandPool.DisposeAsync();
     }
 
-    private sealed class Pool : IAsyncDisposable
+    private sealed class CommandPool : IAsyncDisposable
     {
-        private readonly int poolSize;
-        private int waitingRenters;
-
-        private readonly Channel<NpgsqlCommand> queue = Channel.CreateUnbounded<NpgsqlCommand>(
+        private int _awaitingConnections;
+        private readonly Channel<NpgsqlCommand> _conns = Channel.CreateUnbounded<NpgsqlCommand>(
             new UnboundedChannelOptions
             {
                 AllowSynchronousContinuations = true,
@@ -226,49 +211,48 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
                 SingleWriter = false
             });
 
-        public Pool(IEnumerable<NpgsqlCommand> items, int poolSize)
+        public CommandPool(IEnumerable<NpgsqlCommand> items, int poolSize)
         {
             for (var i = 0; i < poolSize; i++)
             {
-                if (!queue.Writer.TryWrite(items.ElementAt(i)))
-                    throw new ApplicationException("Failed to enqueue starting item on Pool.");
+                _ = _conns.Writer.TryWrite(items.ElementAt(i));
             }
         }
 
-        public async ValueTask<PoolItem> RentAsync()
+        public async ValueTask<Command> RentAsync()
         {
             NpgsqlCommand? item = null;
-            Interlocked.Increment(ref waitingRenters);
+            Command command;
+            Interlocked.Increment(ref _awaitingConnections);
             try
             {
-                item = await queue.Reader.ReadAsync();
-                var poolItem = new PoolItem(item, ReturnPoolItemAsync);
-                return poolItem;
+                item = await _conns.Reader.ReadAsync();
+                command = new Command(item, ReturnPoolItemAsync);
             }
             catch
             {
                 if (item != null)
-                    await queue.Writer.WriteAsync(item);
+                    await _conns.Writer.WriteAsync(item);
                 throw;
             }
-            finally
-            {
-                Interlocked.Decrement(ref waitingRenters);
-            }
+            Interlocked.Decrement(ref _awaitingConnections);
+            return command;
+            
+            
         }
 
         private async ValueTask<List<NpgsqlCommand>> ReturnAllAsync()
         {
             var items = new List<NpgsqlCommand>();
-            await foreach (var item in queue.Reader.ReadAllAsync())
+            await foreach (var item in _conns.Reader.ReadAllAsync())
                 items.Add(item);
             return items;
         }
 
-        private async ValueTask ReturnPoolItemAsync(PoolItem poolItem)
+        private async ValueTask ReturnPoolItemAsync(Command command)
         {
-            poolItem.Value.Connection = null;
-            await queue.Writer.WriteAsync(poolItem.Value);
+            command.Value.Connection = null;
+            await _conns.Writer.WriteAsync(command.Value);
         }
 
         public async ValueTask DisposeAsync()
@@ -278,7 +262,7 @@ public class Database(NpgsqlDataSource dataSource) : IAsyncDisposable
         }
     }
 
-    public readonly struct PoolItem(NpgsqlCommand value, Func<PoolItem, ValueTask> returnPoolItemAsync)
+    public readonly struct Command(NpgsqlCommand value, Func<Command, ValueTask> returnPoolItemAsync)
     {
         public NpgsqlCommand Value { get; } = value;
 
