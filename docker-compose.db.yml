@@ -16,8 +16,9 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.9"
-          memory: "300MB"
+          cpus: "1"
+          memory: "150MB"
+          
 networks: 
   default:
     driver: bridge
